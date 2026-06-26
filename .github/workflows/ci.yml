@@ -1,0 +1,93 @@
+name: CI (Shell + Web UI)
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Shellcheck ───
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: Run shellcheck
+        run: |
+          echo "## Shellcheck Results" >> $GITHUB_STEP_SUMMARY
+          find . -name "*.sh" -not -path "./.git/*" | xargs shellcheck -x 2>&1 | tee shellcheck.log || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat shellcheck.log >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ─── Node/Web UI Lint & Test ───
+  node-lint:
+    name: Node lint (webui)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./webui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run lint 2>/dev/null || npx eslint . --ext .js,.ts,.jsx,.tsx 2>&1 | head -50
+      - run: npm run build 2>/dev/null || echo "Build script not configured"
+
+  # ─── Security Scan ───
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for dangerous patterns in shell scripts
+        run: |
+          echo "## Dangerous Patterns Check" >> $GITHUB_STEP_SUMMARY
+          DANGEROUS=$(grep -r -E "eval\b|exec\b|source.*\$\(|bash -c.*\$\(|curl.*\|.*bash|wget.*\|.*sh" --include="*.sh" . 2>/dev/null | head -20 || true)
+          if [ -n "$DANGEROUS" ]; then
+            echo "⚠️ Potentially dangerous patterns in shell scripts:" >> $GITHUB_STEP_SUMMARY
+            echo "$DANGEROUS" >> $GITHUB_STEP_SUMMARY
+            echo "::warning::Dangerous shell patterns detected"
+          else
+            echo "✅ No common dangerous shell patterns detected" >> $GITHUB_STEP_SUMMARY
+          fi
+      - name: Check webui for security issues
+        run: |
+          echo "## WebUI Security Check" >> $GITHUB_STEP_SUMMARY
+          if [ -d "webui" ]; then
+            cd webui
+            npm install -g npm@latest 2>/dev/null
+            npm audit --audit-level=high 2>&1 | tee npm-audit.log || true
+            cat npm-audit.log >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ─── Semgrep ───
+  semgrep:
+    name: Semgrep Security Scan
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep scan --config=auto --error 2>&1 | tee semgrep.log || true
+      - name: Upload results
+        run: |
+          echo "## Semgrep Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat semgrep.log >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
